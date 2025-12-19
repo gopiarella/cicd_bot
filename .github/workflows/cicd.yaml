@@ -27,18 +27,18 @@ jobs:
       # 3️⃣ Build Docker image
       - name: Build Docker image
         run: |
-          docker build -t gopiarella/cicd_chatbot:latest .
+          docker build -t 957gopi/cicd_chatbot:latest .
 
       # 4️⃣ Push Docker image (only on push, not PR)
       - name: Push Docker image
         if: github.event_name == 'push'
         run: |
-          docker push gopiarella/cicd_chatbot:latest
+          docker push 957gopi/cicd_chatbot:latest
 
       # 5️⃣ Run container to verify it starts
       - name: Run container (test)
         run: |
-          docker run -d -p 5000:5000 --name test_app gopiarella/cicd_chatbot:latest
+          docker run -d -p 5000:5000 --name test_app 957gopi/cicd_chatbot:latest
           sleep 10
           docker ps
 
