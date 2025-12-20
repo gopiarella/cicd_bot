@@ -1,26 +1,23 @@
-from flask import Flask, request, jsonify
-import google.generativeai as genai
+from flask import Flask, request, render_template
 import os
+from google import genai
 
 app = Flask(__name__)
 
-# Configure Gemini
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-model = genai.GenerativeModel("gemini-1.5-flash")
+client = genai.Client(api_key=os.environ.get("GOOGLE_GEMINI_API_KEY"))
 
-@app.route("/")
-def home():
-    return "Gemini Chatbot is running!"
-
-@app.route("/chat", methods=["POST"])
+@app.route("/", methods=["GET", "POST"])
 def chat():
-    user_input = request.json.get("message")
+    response_text = ""
+    if request.method == "POST":
+        user_input = request.form["message"]
+        response = client.models.generate_content(
+            model="gemini-1.5-flash",
+            contents=user_input
+        )
+        response_text = response.text
 
-    if not user_input:
-        return jsonify({"error": "Message is required"}), 400
-
-    response = model.generate_content(user_input)
-    return jsonify({"reply": response.text})
+    return render_template("index.html", response=response_text)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
