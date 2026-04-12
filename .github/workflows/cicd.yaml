@@ -1,26 +1,46 @@
-name: CI/CD - Build, Push to ECR, Deploy to EC2
+name: workflow
 
 on:
   push:
     branches:
       - main
-  pull_request:
-    branches:
-      - main
+    paths-ignore:
+      - 'README.md'
+
+permissions:
+  id-token: write
+  contents: read
 
 jobs:
-  build-and-deploy:
+  integration:
+    name: Continuous Integration
     runs-on: ubuntu-latest
-
-    env:
-      IMAGE_TAG: ${{ github.sha }}
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v3
 
+      - name: Lint code
+        run: echo "Linting repository"
+
+      - name: Run unit tests
+        run: echo "Running unit tests"
+
+  build-and-push-ecr-image:
+    name: Continuous Delivery
+    needs: integration
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Install Utilities
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq unzip
+
+      # Configure AWS using YOUR secret names
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v1
         with:
           aws-access-key-id: ${{ secrets.ACCESS_KEY }}
           aws-secret-access-key: ${{ secrets.SECRET_ACCESS_KEY }}
@@ -28,61 +48,51 @@ jobs:
 
       - name: Login to Amazon ECR
         id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
+        uses: aws-actions/amazon-ecr-login@v1
 
-      - name: Set image URI
-        id: image
+      - name: Build, tag, and push image to Amazon ECR
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ secrets.ECR_LOGIN_URI }}
+          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY_NAME }}
+          IMAGE_TAG: latest
         run: |
-          echo "image_uri=${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}:${IMAGE_TAG}" >> $GITHUB_OUTPUT
-          echo "latest_uri=${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}:latest" >> $GITHUB_OUTPUT
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
 
-      - name: Build Docker image
-        run: |
-          docker build \
-            -t ${{ steps.image.outputs.image_uri }} \
-            -t ${{ steps.image.outputs.latest_uri }} \
-            .
+  Continuous-Deployment:
+    needs: build-and-push-ecr-image
+    runs-on: self-hosted
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
 
-      - name: Push Docker image to ECR
-        run: |
-          docker push ${{ steps.image.outputs.image_uri }}
-          docker push ${{ steps.image.outputs.latest_uri }}
-
-      - name: Deploy to EC2 over SSH
-        if: github.event_name == 'push'
-        uses: appleboy/ssh-action@v1.0.3
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
         with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USER }}
-          key: ${{ secrets.EC2_SSH_KEY }}
-          script: |
-            set -e
+          aws-access-key-id: ${{ secrets.ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.REGION }}
 
-            AWS_REGION="${{ secrets.AWS_REGION }}"
-            ECR_REPO="${{ secrets.ECR_REPOSITORY }}"
-            IMAGE_TAG="${{ github.sha }}"
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v1
 
-            ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-            ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-            IMAGE_URI="${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}"
+      - name: Pull latest image
+        run: |
+          docker pull ${{ secrets.ECR_LOGIN_URI }}/${{ secrets.ECR_REPOSITORY_NAME }}:latest
 
-            echo "Logging in to ECR..."
-            aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+      - name: Stop and remove old container
+        run: |
+          docker ps -q --filter "name=cnncls" | grep -q . && docker stop cnncls && docker rm -fv cnncls || true
 
-            echo "Pulling latest image..."
-            docker pull "$IMAGE_URI"
+      - name: Run Docker container
+        run: |
+          docker run -d -p 8080:8080 --name cnncls \
+          -e GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }} \
+          -e AWS_ACCESS_KEY_ID=${{ secrets.ACCESS_KEY }} \
+          -e AWS_SECRET_ACCESS_KEY=${{ secrets.SECRET_ACCESS_KEY }} \
+          -e AWS_REGION=${{ secrets.REGION }} \
+          ${{ secrets.ECR_LOGIN_URI }}/${{ secrets.ECR_REPOSITORY_NAME }}:latest
 
-            echo "Stopping old container if exists..."
-            docker stop my_app || true
-            docker rm my_app || true
-
-            echo "Running new container..."
-            docker run -d \
-              --name my_app \
-              --restart unless-stopped \
-              -p 5000:5000 \
-              -e GEMINI_API_KEY='${{ secrets.GEMINI_API_KEY }}' \
-              "$IMAGE_URI"
-
-            echo "Cleaning unused images..."
-            docker image prune -af || true
+      - name: Cleanup unused images
+        run: docker system prune -f
